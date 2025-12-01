@@ -1,0 +1,5 @@
+{
+  "name": "StoryWeaver",
+  "description": "An interactive story map builder allowing users to design, visualize, and export complex non-linear narratives using a node-based interface and AI assistance.",
+  "requestFramePermissions": []
+}
