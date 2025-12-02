@@ -26,6 +26,7 @@ const GraphVisualizer: React.FC<GraphVisualizerProps> = ({ nodes, links, onNodeS
   
   // We keep a reference to the simulation to stop/restart it
   const simulationRef = useRef<d3.Simulation<ExtendedD3Node, D3Link> | null>(null);
+  const zoomTransformRef = useRef<d3.ZoomTransform>(d3.zoomIdentity);
 
   // Cache for node positions to prevent reset on re-render
   const nodePositionsRef = useRef<Map<string, { x: number, y: number, fx?: number | null, fy?: number | null }>>(new Map());
@@ -36,10 +37,14 @@ const GraphVisualizer: React.FC<GraphVisualizerProps> = ({ nodes, links, onNodeS
 
     const width = containerRef.current.clientWidth;
     const height = containerRef.current.clientHeight;
+    const columnSpacing = 260;
+    const rowSpacing = 140;
+    const horizontalMargin = 140;
 
     // Clear previous SVG content to avoid duplicates on re-render
     const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove();
+    const preservedTransform = zoomTransformRef.current || d3.zoomIdentity;
 
     // --- 1. Topology Analysis for Layout ---
     const incomingCount: Record<string, number> = {};
@@ -82,14 +87,27 @@ const GraphVisualizer: React.FC<GraphVisualizerProps> = ({ nodes, links, onNodeS
         if (nodeLevels[n.id] === undefined) nodeLevels[n.id] = 0;
     });
 
+    // Group nodes by level for cleaner grid placement
+    const levelBuckets: Record<number, StoryNode[]> = {};
+    nodes.forEach(n => {
+        const level = nodeLevels[n.id] || 0;
+        if (!levelBuckets[level]) levelBuckets[level] = [];
+        levelBuckets[level].push(n);
+    });
+
 
     // --- 3. Prepare Data for D3 ---
-    const levelSpacing = 200;
+    const levelSpacing = columnSpacing;
 
     const d3Nodes: ExtendedD3Node[] = nodes.map(n => {
         const cached = nodePositionsRef.current.get(n.id);
-        const autoX = (nodeLevels[n.id] || 0) * levelSpacing + 100;
-        const autoY = height / 2 + (Math.random() - 0.5) * 100;
+        const level = nodeLevels[n.id] || 0;
+        const siblings = levelBuckets[level] || [];
+        const startY = height / 2 - ((siblings.length - 1) * rowSpacing) / 2;
+        const indexInLevel = Math.max(0, siblings.findIndex(s => s.id === n.id));
+
+        const autoX = horizontalMargin + level * levelSpacing;
+        const autoY = startY + indexInLevel * rowSpacing;
 
         // Use cached position if available, otherwise use auto layout position
         const currentX = cached ? cached.x : autoX;
@@ -127,35 +145,66 @@ const GraphVisualizer: React.FC<GraphVisualizerProps> = ({ nodes, links, onNodeS
       .attr("fill", d => d === "end-selected" ? "#60a5fa" : "#64748b");
 
     const g = svg.append("g");
+    // Swimlane backgrounds per depth (inside zoomable group)
+    const laneGroup = g.append("g").attr("class", "lanes");
 
     const zoom = d3.zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.1, 4])
       .on("zoom", (event) => {
         g.attr("transform", event.transform);
+        zoomTransformRef.current = event.transform;
       });
 
     svg.call(zoom);
+    // Restore previous zoom/pan so selection change does not jump the view
+    svg.call(zoom.transform, preservedTransform);
 
     // Apply saved zoom transform if exists? (Optional, skipping for now to keep simple)
 
 
     // --- 5. Simulation Setup ---
     const simulation = d3.forceSimulation<ExtendedD3Node, D3Link>(d3Nodes)
-      .force("link", d3.forceLink<ExtendedD3Node, D3Link>(d3Links).id(d => d.id).distance(150))
-      .force("charge", d3.forceManyBody().strength(-500))
-      .force("collide", d3.forceCollide().radius(50));
+      .force("link", d3.forceLink<ExtendedD3Node, D3Link>(d3Links).id(d => d.id).distance(140).strength(0.6))
+      .force("charge", d3.forceManyBody().strength(-200))
+      .force("collide", d3.forceCollide().radius(46).strength(1));
       
     // Only apply layout forces if NOT in Fixed Mode
     if (!isFixed) {
         simulation
-            .force("x", d3.forceX<ExtendedD3Node>(d => (d.level || 0) * levelSpacing).strength(1.2))
-            .force("y", d3.forceY(height / 2).strength(0.1));
+            .force("x", d3.forceX<ExtendedD3Node>(d => horizontalMargin + (d.level || 0) * levelSpacing).strength(2))
+            .force("y", d3.forceY<ExtendedD3Node>(d => {
+                const siblings = levelBuckets[d.level || 0] || [];
+                const startY = height / 2 - ((siblings.length - 1) * rowSpacing) / 2;
+                const indexInLevel = Math.max(0, siblings.findIndex(s => s.id === d.id));
+                return startY + indexInLevel * rowSpacing;
+            }).strength(2));
     } else {
         // In Fixed Mode, we remove the positioning forces so nodes don't drift if unpinned momentarily
         simulation.force("x", null).force("y", null);
     }
 
     simulationRef.current = simulation;
+
+    // Draw swimlanes to visually separate levels
+    const sortedLevels = Object.keys(levelBuckets).map(Number).sort((a, b) => a - b);
+    const laneWidth = levelSpacing - 60;
+    const lanePaddingY = 80;
+    const laneHeight = Math.max(height - lanePaddingY * 2, rowSpacing);
+
+    laneGroup.selectAll("rect")
+      .data(sortedLevels)
+      .enter()
+      .append("rect")
+      .attr("x", lvl => horizontalMargin + lvl * levelSpacing - laneWidth / 2)
+      .attr("y", lanePaddingY)
+      .attr("width", laneWidth)
+      .attr("height", laneHeight)
+      .attr("fill", "#0b1221")
+      .attr("fill-opacity", 0.4)
+      .attr("stroke", "#1f2937")
+      .attr("pointer-events", "none")
+      .attr("stroke-dasharray", "4 6")
+      .attr("stroke-width", 1);
 
     // --- 6. Draw Elements ---
     const link = g.append("g")
@@ -165,9 +214,10 @@ const GraphVisualizer: React.FC<GraphVisualizerProps> = ({ nodes, links, onNodeS
       .enter().append("g")
       .attr("class", "link-group");
 
-    const linkPath = link.append("line")
+    const linkPath = link.append("path")
       .attr("stroke", "#475569")
       .attr("stroke-width", 2)
+      .attr("fill", "none")
       .attr("marker-end", "url(#end)");
 
     const linkLabelBg = link.append("rect")
@@ -250,21 +300,28 @@ const GraphVisualizer: React.FC<GraphVisualizerProps> = ({ nodes, links, onNodeS
           }
       });
 
+      // Curved edge path (horizontal-first curve)
       linkPath
-        .attr("x1", d => (d.source as ExtendedD3Node).x!)
-        .attr("y1", d => (d.source as ExtendedD3Node).y!)
-        .attr("x2", d => (d.target as ExtendedD3Node).x!)
-        .attr("y2", d => (d.target as ExtendedD3Node).y!);
+        .attr("d", d => {
+            const sx = (d.source as ExtendedD3Node).x!;
+            const sy = (d.source as ExtendedD3Node).y!;
+            const tx = (d.target as ExtendedD3Node).x!;
+            const ty = (d.target as ExtendedD3Node).y!;
+            const midX = sx + (tx - sx) * 0.5;
+            return `M${sx},${sy} C${midX},${sy} ${midX},${ty} ${tx},${ty}`;
+        });
+
+      const computedLabelWidth = (label: string | undefined) => Math.max(32, (label?.length || 0) * 6);
 
       linkLabel
         .attr("x", d => ((d.source as ExtendedD3Node).x! + (d.target as ExtendedD3Node).x!) / 2)
         .attr("y", d => ((d.source as ExtendedD3Node).y! + (d.target as ExtendedD3Node).y!) / 2);
         
       linkLabelBg
-        .attr("x", d => ((d.source as ExtendedD3Node).x! + (d.target as ExtendedD3Node).x!) / 2 - 20)
-        .attr("y", d => ((d.source as ExtendedD3Node).y! + (d.target as ExtendedD3Node).y!) / 2 - 6)
-        .attr("width", 40)
-        .attr("height", 14);
+        .attr("x", d => ((d.source as ExtendedD3Node).x! + (d.target as ExtendedD3Node).x!) / 2 - computedLabelWidth(d.label) / 2)
+        .attr("y", d => ((d.source as ExtendedD3Node).y! + (d.target as ExtendedD3Node).y!) / 2 - 9)
+        .attr("width", d => computedLabelWidth(d.label))
+        .attr("height", 18);
 
       node.attr("transform", d => `translate(${d.x},${d.y})`);
     });
